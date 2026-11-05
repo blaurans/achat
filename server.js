@@ -320,23 +320,28 @@ function parseConstraints(q) {
 
 function extractRam(title) {
   if (!title) return null;
-  const matches = title.match(/(\d+)\s*(?:go|gb)/gi);
-  if (!matches) return null;
-  const nums = matches.map(x => parseInt(x, 10)).filter(n => !isNaN(n));
-  if (!nums.length) return null;
-  return Math.max(...nums);
+  const patterns = [
+    /(\d+)\s*(?:go|gb)\s*(?:de\s*)?(?:ram|ddr\d*|lpddr\d*)/i,
+    /(?:ram|ddr\d*|lpddr\d*)\s*(\d+)\s*(?:go|gb)/i,
+    /(\d+)\s*(?:go|gb)\s*ram/i
+  ];
+  for (const p of patterns) {
+    const m = title.match(p);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
 }
 function applyConstraints(items, c) {
   return items.filter(it => {
-    if (c.priceMax != null && it.price != null && it.price > c.priceMax) return false;
-    if (c.priceMin != null && it.price != null && it.price < c.priceMin) return false;
+    if (c.priceMax != null && (it.price == null || it.price > c.priceMax)) return false;
+    if (c.priceMin != null && (it.price == null || it.price < c.priceMin)) return false;
     if (c.ramMin != null) {
       const r = extractRam(it.title);
-      if (r != null && r < c.ramMin) return false;
+      if (r == null || r < c.ramMin) return false;
     }
     if (c.ramMax != null) {
       const r = extractRam(it.title);
-      if (r != null && r > c.ramMax) return false;
+      if (r == null || r > c.ramMax) return false;
     }
     return true;
   });
