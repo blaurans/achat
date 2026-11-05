@@ -13,7 +13,7 @@ services:
 
 volumes:
   achat_data:
-    name: achat_data
+    external: true
 
 networks:
   headscale_default:
