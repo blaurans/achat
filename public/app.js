@@ -286,5 +286,3 @@ $('#notifyBtn').addEventListener('click', async () => {
   await loadTracked();
   setInterval(loadTracked, 60000);
 })();
-EOF
-echo done
