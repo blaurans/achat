@@ -28,16 +28,29 @@ function updateAuthUI() {
   const info = $('#authInfo');
   const loginBtn = $('#loginBtn');
   const logoutBtn = $('#logoutBtn');
+  const label = $('#emailAlertsLabel');
+  const cb = $('#emailAlerts');
   if (currentUser) {
     info.textContent = `Connecté : ${currentUser.name || currentUser.email}`;
     loginBtn.style.display = 'none';
     logoutBtn.style.display = '';
+    label.style.display = '';
+    cb.checked = currentUser.email_alerts !== 0;
   } else {
     info.textContent = 'Non connecté (données locales du navigateur)';
     loginBtn.style.display = '';
     logoutBtn.style.display = 'none';
+    label.style.display = 'none';
   }
 }
+
+$('#emailAlerts').addEventListener('change', async () => {
+  if (!currentUser) return;
+  try {
+    await api('/auth/settings', { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email_alerts: $('#emailAlerts').checked }) });
+    currentUser.email_alerts = $('#emailAlerts').checked ? 1 : 0;
+  } catch (e) { alert(e.message); }
+});
 
 $('#loginBtn').addEventListener('click', () => { window.location.href = '/auth/google'; });
 $('#logoutBtn').addEventListener('click', async () => {

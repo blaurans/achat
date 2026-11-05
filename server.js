@@ -3,6 +3,7 @@ const Database = require('better-sqlite3');
 const { chromium } = require('playwright');
 const path = require('path');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 const PORT = process.env.PORT || 3000;
 const CHROMIUM = process.env.CHROMIUM || '/usr/bin/chromium';
@@ -11,6 +12,12 @@ const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production-please';
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
 const SECURE = BASE_URL.startsWith('https');
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = process.env.SMTP_PORT || '587';
+const SMTP_SECURE = process.env.SMTP_SECURE || 'false';
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || 'no-reply@laurans.org';
 
 const app = express();
 app.use(express.json());
@@ -92,6 +99,30 @@ db.exec(`CREATE TABLE IF NOT EXISTS users (
 const trackedCols = db.prepare('PRAGMA table_info(tracked)').all().map(c=>c.name);
 if (!trackedCols.includes('user_id')) {
   db.exec('ALTER TABLE tracked ADD COLUMN user_id INTEGER REFERENCES users(id)');
+}
+const userCols = db.prepare('PRAGMA table_info(users)').all().map(c=>c.name);
+if (!userCols.includes('email_alerts')) {
+  db.exec('ALTER TABLE users ADD COLUMN email_alerts INTEGER DEFAULT 1');
+}
+const trackedCols2 = db.prepare('PRAGMA table_info(tracked)').all().map(c=>c.name);
+if (!trackedCols2.includes('last_notified_price')) {
+  db.exec('ALTER TABLE tracked ADD COLUMN last_notified_price REAL');
+}
+if (!trackedCols2.includes('last_notified_at')) {
+  db.exec('ALTER TABLE tracked ADD COLUMN last_notified_at TEXT');
+}
+
+let transporter = null;
+if (SMTP_HOST) {
+  transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: parseInt(SMTP_PORT, 10),
+    secure: SMTP_SECURE === 'true',
+    auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined
+  });
+  console.log('SMTP configured:', SMTP_HOST);
+} else {
+  console.log('SMTP not configured: email alerts disabled');
 }
 
 let browserPromise = null;
@@ -268,7 +299,7 @@ app.get('/auth/google/callback', async (req, res) => {
 
 app.get('/auth/me', (req, res) => {
   if (!req.user) return res.json({ user: null });
-  res.json({ user: { id: req.user.id, email: req.user.email, name: req.user.name, picture: req.user.picture } });
+  res.json({ user: { id: req.user.id, email: req.user.email, name: req.user.name, picture: req.user.picture, email_alerts: req.user.email_alerts } });
 });
 
 app.post('/auth/logout', (req, res) => {
@@ -346,6 +377,14 @@ function applyConstraints(items, c) {
     return true;
   });
 }
+
+
+app.patch('/auth/settings', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
+  const { email_alerts } = req.body || {};
+  db.prepare('UPDATE users SET email_alerts=? WHERE id=?').run(email_alerts ? 1 : 0, req.user.id);
+  res.json({ ok: true });
+});
 
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').trim();
@@ -449,10 +488,49 @@ async function fetchPrice(row) {
 }
 
 
+async function sendDealEmail(user, row, price) {
+  if (!transporter || !user || !user.email || user.email_alerts === 0) return;
+  const prices = db.prepare('SELECT price FROM prices WHERE tracked_id=? ORDER BY checked_at ASC').all(row.id).map(p=>p.price);
+  const min = prices.length ? Math.min(...prices) : price;
+  const avg = prices.length ? prices.reduce((a,b)=>a+b,0)/prices.length : price;
+  const subject = 'Bonne offre détectée : ' + row.title;
+  const text = [
+    'Une bonne offre a été détectée pour un produit que vous suivez.',
+    '',
+    'Produit : ' + row.title,
+    'Source : ' + (row.source === 'amazon' ? 'Amazon.fr' : 'AliExpress'),
+    'Prix actuel : ' + price.toFixed(2) + ' €',
+    'Prix minimum historique : ' + min.toFixed(2) + ' €',
+    'Prix moyen : ' + avg.toFixed(2) + ' €',
+    row.target_price != null ? 'Prix cible : ' + Number(row.target_price).toFixed(2) + ' €' : '',
+    '',
+    'Lien : ' + row.url
+  ].filter(Boolean).join('\n');
+  try {
+    await transporter.sendMail({ from: SMTP_FROM, to: user.email, subject, text });
+    console.log('Deal email sent to', user.email, 'for', row.id);
+  } catch (e) {
+    console.error('Email send failed:', e.message);
+  }
+}
+
 async function checkPrice(row) {
   const { price, raw } = await fetchPrice(row);
   if (price != null && row.id) {
     db.prepare('INSERT INTO prices (tracked_id, price) VALUES (?,?)').run(row.id, price);
+    // notification logic
+    const user = row.user_id ? db.prepare('SELECT * FROM users WHERE id=?').get(row.user_id) : null;
+    const prices = db.prepare('SELECT price FROM prices WHERE tracked_id=? ORDER BY checked_at ASC').all(row.id).map(p=>p.price);
+    const min = prices.length ? Math.min(...prices) : price;
+    const avg = prices.length ? prices.reduce((a,b)=>a+b,0)/prices.length : price;
+    let isDeal = false;
+    if (row.target_price != null && price <= row.target_price) isDeal = true;
+    if (price <= min) isDeal = true;
+    if (price <= avg * 0.9) isDeal = true;
+    if (isDeal && (row.last_notified_price == null || price < row.last_notified_price)) {
+      await sendDealEmail(user, row, price);
+      db.prepare('UPDATE tracked SET last_notified_price=?, last_notified_at=datetime(\'now\') WHERE id=?').run(price, row.id);
+    }
   }
   return { id: row.id, price, raw };
 }
