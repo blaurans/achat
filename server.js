@@ -279,7 +279,9 @@ app.post('/auth/logout', (req, res) => {
 
 function parseConstraints(q) {
   const c = { ramMin: null, ramMax: null, priceMin: null, priceMax: null };
-  const ql = q.toLowerCase();
+  // normalize euro symbols
+  const qn = q.replace(/\b(\d+)\s*e\b/gi, '$1 €').replace(/\beuros?\b/gi, '€');
+  const ql = qn.toLowerCase();
   // RAM min
   let m = ql.match(/(\d+)\s*go\s*(?:de\s*ram)?\s*(?:minimum|au\s*moins|min\.?)/);
   if (m) c.ramMin = parseInt(m[1], 10);
@@ -290,18 +292,32 @@ function parseConstraints(q) {
   if (m) c.ramMax = parseInt(m[1], 10);
   m = ql.match(/(?:maximum|max\.?)\s*(\d+)\s*go\s*(?:de\s*ram)?/);
   if (m && !c.ramMax) c.ramMax = parseInt(m[1], 10);
-  // price max
-  m = ql.match(/(?:moins de|max(?:imum)?|jusqu['’]?à|maximum)\s*(\d+(?:[.,]\d+)?)\s*€/);
+  // implicit RAM min: "8 go de ram" without max
+  if (c.ramMin == null && c.ramMax == null) {
+    m = ql.match(/(\d+)\s*go\s*(?:de\s*ram)?/);
+    if (m) {
+      const after = ql.slice(m.index + m[0].length).trim();
+      if (!/^max/.test(after)) c.ramMin = parseInt(m[1], 10);
+    }
+  }
+  // price max: supports €, e, euros
+  const cur = '(?:€|eur)';
+  m = ql.match(new RegExp("(?:prix\s*)?(?:moins de|max(?:imum)?|jusqu['’]?à|maximum)\\s*(\\d+(?:[.,]\\d+)?)\\s*" + cur + "?", 'i'));
   if (m) c.priceMax = parseFloat(m[1].replace(',', '.'));
-  m = ql.match(/(\d+(?:[.,]\d+)?)\s*€\s*(?:maximum|max\.?)/);
+  m = ql.match(new RegExp("(\\d+(?:[.,]\\d+)?)\\s*" + cur + "\\s*(?:maximum|max\\.?)", 'i'));
+  if (m && !c.priceMax) c.priceMax = parseFloat(m[1].replace(',', '.'));
+  m = ql.match(new RegExp("prix\\s*max(?:imum)?\\s*(\\d+(?:[.,]\\d+)?)", 'i'));
+  if (m && !c.priceMax) c.priceMax = parseFloat(m[1].replace(',', '.'));
+  m = ql.match(new RegExp("max(?:imum)?\\s*(\\d+(?:[.,]\\d+)?)", 'i'));
   if (m && !c.priceMax) c.priceMax = parseFloat(m[1].replace(',', '.'));
   // price min
-  m = ql.match(/(?:plus de|min(?:imum)?|au moins)\s*(\d+(?:[.,]\d+)?)\s*€/);
+  m = ql.match(new RegExp("(?:plus de|min(?:imum)?|au moins)\\s*(\\d+(?:[.,]\\d+)?)\\s*" + cur + "?", 'i'));
   if (m) c.priceMin = parseFloat(m[1].replace(',', '.'));
-  m = ql.match(/(\d+(?:[.,]\d+)?)\s*€\s*(?:minimum|min\.?)/);
+  m = ql.match(new RegExp("(\\d+(?:[.,]\\d+)?)\\s*" + cur + "\\s*(?:minimum|min\\.?)", 'i'));
   if (m && !c.priceMin) c.priceMin = parseFloat(m[1].replace(',', '.'));
   return c;
 }
+
 function extractRam(title) {
   if (!title) return null;
   const matches = title.match(/(\d+)\s*(?:go|gb)/gi);
