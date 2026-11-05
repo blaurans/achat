@@ -2,13 +2,62 @@ const express = require('express');
 const Database = require('better-sqlite3');
 const { chromium } = require('playwright');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const CHROMIUM = process.env.CHROMIUM || '/usr/bin/chromium';
+const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production-please';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
+const SECURE = BASE_URL.startsWith('https');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  header.split(';').forEach(part => {
+    const idx = part.indexOf('=');
+    if (idx < 0) return;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx+1).trim();
+    try { out[k] = decodeURIComponent(v); } catch { out[k] = v; }
+  });
+  return out;
+}
+function signSession(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return data + '.' + sig;
+}
+function verifySession(token) {
+  if (!token) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  } catch { return null; }
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString());
+    if (payload.exp && payload.exp < Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
+app.use((req, res, next) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = verifySession(cookies.session);
+  req.user = null;
+  if (session && session.uid) {
+    req.user = db.prepare('SELECT * FROM users WHERE id=?').get(session.uid) || null;
+  }
+  next();
+});
+
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'deals.db');
 const db = new Database(DB_PATH);
@@ -32,6 +81,18 @@ CREATE TABLE IF NOT EXISTS prices (
   FOREIGN KEY(tracked_id) REFERENCES tracked(id) ON DELETE CASCADE
 );
 `);
+db.exec(`CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  google_sub TEXT UNIQUE NOT NULL,
+  email TEXT,
+  name TEXT,
+  picture TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
+const trackedCols = db.prepare('PRAGMA table_info(tracked)').all().map(c=>c.name);
+if (!trackedCols.includes('user_id')) {
+  db.exec('ALTER TABLE tracked ADD COLUMN user_id INTEGER REFERENCES users(id)');
+}
 
 let browserPromise = null;
 async function getBrowser() {
@@ -143,6 +204,78 @@ async function scrapeAliExpress(query) {
   }
 }
 
+
+// Auth (Google OAuth, optional)
+app.get('/auth/google', (req, res) => {
+  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(500).send('Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
+  const state = crypto.randomBytes(16).toString('hex');
+  res.setHeader('Set-Cookie', `oauth_state=${state}; HttpOnly; ${SECURE?'Secure; ':''}SameSite=Lax; Path=/; Max-Age=300`);
+  const redirectUri = BASE_URL + '/auth/google/callback';
+  const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
+    client_id: CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: 'openid email profile',
+    state,
+    access_type: 'online',
+    prompt: 'select_account'
+  }).toString();
+  res.redirect(url);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  const { code, state } = req.query;
+  const cookies = parseCookies(req.headers.cookie);
+  if (!code || !state || state !== cookies.oauth_state) return res.status(400).send('Invalid OAuth state');
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        redirect_uri: BASE_URL + '/auth/google/callback',
+        grant_type: 'authorization_code'
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) throw new Error(tokenData.error_description || 'token error');
+    const userRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+      headers: { Authorization: 'Bearer ' + tokenData.access_token }
+    });
+    const profile = await userRes.json();
+    if (!profile.sub) throw new Error('no profile');
+    let user = db.prepare('SELECT * FROM users WHERE google_sub=?').get(profile.sub);
+    if (!user) {
+      const info = db.prepare('INSERT INTO users (google_sub,email,name,picture) VALUES (?,?,?,?)').run(profile.sub, profile.email || null, profile.name || null, profile.picture || null);
+      user = db.prepare('SELECT * FROM users WHERE id=?').get(info.lastInsertRowid);
+    } else {
+      db.prepare('UPDATE users SET email=?,name=?,picture=? WHERE id=?').run(profile.email || null, profile.name || null, profile.picture || null, user.id);
+      user = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
+    }
+    const sessionToken = signSession({ uid: user.id, exp: Date.now() + 30*24*60*60*1000 });
+    res.setHeader('Set-Cookie', [
+      `session=${sessionToken}; HttpOnly; ${SECURE?'Secure; ':''}SameSite=Lax; Path=/; Max-Age=${30*24*60*60}`,
+      `oauth_state=; HttpOnly; ${SECURE?'Secure; ':''}SameSite=Lax; Path=/; Max-Age=0`
+    ]);
+    res.redirect('/');
+  } catch (e) {
+    console.error('OAuth error', e);
+    res.status(500).send('Authentication failed: ' + e.message);
+  }
+});
+
+app.get('/auth/me', (req, res) => {
+  if (!req.user) return res.json({ user: null });
+  res.json({ user: { id: req.user.id, email: req.user.email, name: req.user.name, picture: req.user.picture } });
+});
+
+app.post('/auth/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `session=; HttpOnly; ${SECURE?'Secure; ':''}SameSite=Lax; Path=/; Max-Age=0`);
+  res.json({ ok: true });
+});
+
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'missing q' });
@@ -164,7 +297,8 @@ app.get('/api/search', async (req, res) => {
 
 // Tracked products
 app.get('/api/tracked', (req, res) => {
-  const rows = db.prepare('SELECT * FROM tracked ORDER BY created_at DESC').all();
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
+  const rows = db.prepare('SELECT * FROM tracked WHERE user_id=? ORDER BY created_at DESC').all(req.user.id);
   const out = rows.map(r => {
     const prices = db.prepare('SELECT price, checked_at FROM prices WHERE tracked_id=? ORDER BY checked_at ASC').all(r.id);
     const last = prices.length ? prices[prices.length - 1] : null;
@@ -181,24 +315,27 @@ app.get('/api/tracked', (req, res) => {
 });
 
 app.post('/api/tracked', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
   const { source, title, url, image, target_price } = req.body || {};
   if (!source || !title || !url) return res.status(400).json({ error: 'missing fields' });
-  const info = db.prepare('INSERT INTO tracked (source, title, url, image, target_price) VALUES (?,?,?,?,?)').run(source, title, url, image || null, target_price != null ? target_price : null);
+  const info = db.prepare('INSERT INTO tracked (source, title, url, image, target_price, user_id) VALUES (?,?,?,?,?,?)').run(source, title, url, image || null, target_price != null ? target_price : null, req.user.id);
   res.json({ id: info.lastInsertRowid });
 });
 
 app.delete('/api/tracked/:id', (req, res) => {
-  db.prepare('DELETE FROM tracked WHERE id=?').run(req.params.id);
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
+  db.prepare('DELETE FROM tracked WHERE id=? AND user_id=?').run(req.params.id, req.user.id);
   res.json({ ok: true });
 });
 
 app.patch('/api/tracked/:id', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
   const { target_price } = req.body || {};
-  db.prepare('UPDATE tracked SET target_price=? WHERE id=?').run(target_price != null ? target_price : null, req.params.id);
+  db.prepare('UPDATE tracked SET target_price=? WHERE id=? AND user_id=?').run(target_price != null ? target_price : null, req.params.id, req.user.id);
   res.json({ ok: true });
 });
 
-async function checkPrice(row) {
+async function fetchPrice(row) {
   const browser = await getBrowser();
   const page = await newStealthPage(browser);
   try {
@@ -231,17 +368,24 @@ async function checkPrice(row) {
       }, itemId);
     }
     const p = parsePrice(price);
-    if (p != null) {
-      db.prepare('INSERT INTO prices (tracked_id, price) VALUES (?,?)').run(row.id, p);
-    }
-    return { id: row.id, price: p, raw: price };
+    return { price: p, raw: price };
   } finally {
     await page._context.close();
   }
 }
 
+
+async function checkPrice(row) {
+  const { price, raw } = await fetchPrice(row);
+  if (price != null && row.id) {
+    db.prepare('INSERT INTO prices (tracked_id, price) VALUES (?,?)').run(row.id, price);
+  }
+  return { id: row.id, price, raw };
+}
+
 app.post('/api/tracked/:id/check', async (req, res) => {
-  const row = db.prepare('SELECT * FROM tracked WHERE id=?').get(req.params.id);
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
+  const row = db.prepare('SELECT * FROM tracked WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
   if (!row) return res.status(404).json({ error: 'not found' });
   try {
     const r = await checkPrice(row);
@@ -252,7 +396,8 @@ app.post('/api/tracked/:id/check', async (req, res) => {
 });
 
 app.post('/api/check-all', async (req, res) => {
-  const rows = db.prepare('SELECT * FROM tracked').all();
+  if (!req.user) return res.status(401).json({ error: 'auth required' });
+  const rows = db.prepare('SELECT * FROM tracked WHERE user_id=?').all(req.user.id);
   const results = [];
   for (const row of rows) {
     try {
@@ -271,6 +416,18 @@ setInterval(async () => {
     try { await checkPrice(row); } catch (e) { /* ignore */ }
   }
 }, 30 * 60 * 1000);
+
+
+app.post('/api/check-price', async (req, res) => {
+  const { source, url, title } = req.body || {};
+  if (!source || !url) return res.status(400).json({ error: 'missing fields' });
+  try {
+    const r = await fetchPrice({ source, url, title });
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
