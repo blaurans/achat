@@ -1,0 +1,7 @@
+node_modules/
+deals.db
+deals.db-wal
+deals.db-shm
+data/
+*.log
+.DS_Store

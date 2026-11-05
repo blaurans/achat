@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Offres produits — Amazon.fr & AliExpress</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>🔎 Trouver les meilleures offres</h1>
+    <p>Recherchez un produit sur Amazon.fr et AliExpress, comparez les prix, et suivez l'évolution pour être alerté des bonnes affaires.</p>
+  </header>
+
+  <main>
+    <section class="search-panel">
+      <form id="searchForm">
+        <input id="q" type="text" placeholder="ex: mini PC 16Go de ram minimum avec un processeur ryzen" required />
+        <div class="sources">
+          <label><input type="checkbox" name="src" value="amazon" checked /> Amazon.fr</label>
+          <label><input type="checkbox" name="src" value="aliexpress" checked /> AliExpress</label>
+        </div>
+        <button type="submit">Rechercher</button>
+      </form>
+      <div id="status" class="status"></div>
+    </section>
+
+    <section>
+      <h2>Résultats</h2>
+      <div id="results" class="grid"></div>
+    </section>
+
+    <section>
+      <div class="tracked-header">
+        <h2>Suivi des prix</h2>
+        <div>
+          <button id="checkAll">Vérifier tous les prix</button>
+          <button id="notifyBtn">Activer les notifications</button>
+        </div>
+      </div>
+      <div id="tracked" class="tracked-list"></div>
+    </section>
+  </main>
+
+  <template id="cardTpl">
+    <article class="card">
+      <img class="card-img" alt="" />
+      <div class="card-body">
+        <h3 class="card-title"></h3>
+        <div class="card-meta"></div>
+        <div class="card-price"></div>
+        <div class="card-actions">
+          <a class="btn link" target="_blank" rel="noopener">Voir l'offre</a>
+          <button class="btn track">Suivre</button>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>
