@@ -1,0 +1,19 @@
+services:
+  achat:
+    build: .
+    image: achat:latest
+    container_name: achat
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - achat_data:/app/data
+    networks:
+      - headscale_default
+
+volumes:
+  achat_data:
+
+networks:
+  headscale_default:
+    external: true
