@@ -276,6 +276,56 @@ app.post('/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+
+function parseConstraints(q) {
+  const c = { ramMin: null, ramMax: null, priceMin: null, priceMax: null };
+  const ql = q.toLowerCase();
+  // RAM min
+  let m = ql.match(/(\d+)\s*go\s*(?:de\s*ram)?\s*(?:minimum|au\s*moins|min\.?)/);
+  if (m) c.ramMin = parseInt(m[1], 10);
+  m = ql.match(/(?:minimum|au\s*moins|min\.?)\s*(\d+)\s*go\s*(?:de\s*ram)?/);
+  if (m && !c.ramMin) c.ramMin = parseInt(m[1], 10);
+  // RAM max
+  m = ql.match(/(\d+)\s*go\s*(?:de\s*ram)?\s*(?:maximum|max\.?)/);
+  if (m) c.ramMax = parseInt(m[1], 10);
+  m = ql.match(/(?:maximum|max\.?)\s*(\d+)\s*go\s*(?:de\s*ram)?/);
+  if (m && !c.ramMax) c.ramMax = parseInt(m[1], 10);
+  // price max
+  m = ql.match(/(?:moins de|max(?:imum)?|jusqu['’]?à|maximum)\s*(\d+(?:[.,]\d+)?)\s*€/);
+  if (m) c.priceMax = parseFloat(m[1].replace(',', '.'));
+  m = ql.match(/(\d+(?:[.,]\d+)?)\s*€\s*(?:maximum|max\.?)/);
+  if (m && !c.priceMax) c.priceMax = parseFloat(m[1].replace(',', '.'));
+  // price min
+  m = ql.match(/(?:plus de|min(?:imum)?|au moins)\s*(\d+(?:[.,]\d+)?)\s*€/);
+  if (m) c.priceMin = parseFloat(m[1].replace(',', '.'));
+  m = ql.match(/(\d+(?:[.,]\d+)?)\s*€\s*(?:minimum|min\.?)/);
+  if (m && !c.priceMin) c.priceMin = parseFloat(m[1].replace(',', '.'));
+  return c;
+}
+function extractRam(title) {
+  if (!title) return null;
+  const matches = title.match(/(\d+)\s*(?:go|gb)/gi);
+  if (!matches) return null;
+  const nums = matches.map(x => parseInt(x, 10)).filter(n => !isNaN(n));
+  if (!nums.length) return null;
+  return Math.max(...nums);
+}
+function applyConstraints(items, c) {
+  return items.filter(it => {
+    if (c.priceMax != null && it.price != null && it.price > c.priceMax) return false;
+    if (c.priceMin != null && it.price != null && it.price < c.priceMin) return false;
+    if (c.ramMin != null) {
+      const r = extractRam(it.title);
+      if (r != null && r < c.ramMin) return false;
+    }
+    if (c.ramMax != null) {
+      const r = extractRam(it.title);
+      if (r != null && r > c.ramMax) return false;
+    }
+    return true;
+  });
+}
+
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'missing q' });
@@ -286,13 +336,16 @@ app.get('/api/search', async (req, res) => {
   if (sources.includes('amazon')) tasks.push(scrapeAmazon(q).then(r => results.push(...r)).catch(e => errors.push({ source: 'amazon', error: e.message })));
   if (sources.includes('aliexpress')) tasks.push(scrapeAliExpress(q).then(r => results.push(...r)).catch(e => errors.push({ source: 'aliexpress', error: e.message })));
   await Promise.all(tasks);
+  const constraints = parseConstraints(q);
+  const filtered = applyConstraints(results, constraints);
+  const finalResults = filtered.length ? filtered : results;
   // sort by price asc when available
-  results.sort((a, b) => {
+  finalResults.sort((a, b) => {
     const pa = a.price == null ? Infinity : a.price;
     const pb = b.price == null ? Infinity : b.price;
     return pa - pb;
   });
-  res.json({ query: q, results, errors });
+  res.json({ query: q, results: finalResults, errors, constraints, filtered: filtered.length > 0 && filtered.length < results.length });
 });
 
 // Tracked products

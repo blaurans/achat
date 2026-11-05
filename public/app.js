@@ -58,7 +58,18 @@ $('#searchForm').addEventListener('submit', async (e) => {
   $('#results').innerHTML = '';
   try {
     const data = await api('/api/search?q=' + encodeURIComponent(q) + '&sources=' + sources.join(','));
-    $('#status').textContent = `${data.results.length} offre(s) trouvée(s)` + (data.errors.length ? ' — erreurs: ' + data.errors.map(e=>e.source).join(',') : '');
+    let extra = '';
+    if (data.constraints) {
+      const c = data.constraints;
+      const parts = [];
+      if (c.ramMin) parts.push('RAM ≥ ' + c.ramMin + ' Go');
+      if (c.ramMax) parts.push('RAM ≤ ' + c.ramMax + ' Go');
+      if (c.priceMin) parts.push('prix ≥ ' + c.priceMin + ' €');
+      if (c.priceMax) parts.push('prix ≤ ' + c.priceMax + ' €');
+      if (parts.length) extra = ' — filtres: ' + parts.join(', ');
+      if (data.filtered) extra += ' (résultats non conformes masqués)';
+    }
+    $('#status').textContent = `${data.results.length} offre(s) trouvée(s)` + extra + (data.errors.length ? ' — erreurs: ' + data.errors.map(e=>e.source).join(',') : '');
     renderResults(data.results);
   } catch (err) {
     $('#status').textContent = 'Erreur: ' + err.message;
